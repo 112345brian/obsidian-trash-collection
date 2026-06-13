@@ -1,6 +1,11 @@
 import { App, MarkdownRenderer, Modal, TFile, setIcon } from "obsidian";
 import type { TrashCollectionSettings } from "./settings";
 import { FileSuggest } from "./FileSuggest";
+import { getAge } from "./candidates";
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 const FRONTMATTER_RE = /^---[\s\S]*?---\s*\n?/;
 const PREVIEW_LINES = 10;
@@ -62,7 +67,7 @@ export class TriageModal extends Modal {
     const header = card.createDiv({ cls: "tc-card-header" });
     header.createDiv({ cls: "tc-card-title", text: file.basename });
     const meta = header.createDiv({ cls: "tc-card-meta" });
-    const age = Math.floor((Date.now() - file.stat.mtime) / 86_400_000);
+    const age = Math.floor(getAge(this.app, file, this.settings) / 86_400_000);
     meta.createSpan({ text: `${age} day${age === 1 ? "" : "s"} ago` });
     if (file.parent?.name && file.parent.name !== "/") {
       meta.createSpan({ cls: "tc-meta-sep", text: "·" });
@@ -143,7 +148,12 @@ export class TriageModal extends Modal {
 
     const input = actionEl.createEl("input", { cls: "tc-pass2-input", type: "text" }) as HTMLInputElement;
     input.placeholder = "Type a note name…";
-    new FileSuggest(this.app, input, shortcuts);
+    let selectedFile: TFile | null = null;
+    const fileSuggest = new FileSuggest(this.app, input, shortcuts);
+    fileSuggest.onSelect((file) => {
+      selectedFile = file;
+      fileSuggest.setValue(file.basename);
+    });
 
     // Buttons
     const actions = contentEl.createDiv({ cls: "tc-actions" });
@@ -156,7 +166,6 @@ export class TriageModal extends Modal {
     setIcon(applyBtn, "check");
     applyBtn.createSpan({ text: "Apply" });
     applyBtn.addEventListener("click", async () => {
-      const selectedFile = (input as HTMLInputElement & { _selectedFile?: TFile })._selectedFile;
       const targetName = selectedFile?.basename ?? input.value.trim();
       if (!targetName) { this.pass2Index++; await this.renderPass2(); return; }
       const wikilink = `[[${selectedFile ? selectedFile.basename : targetName}]]`;
@@ -179,6 +188,7 @@ export class TriageModal extends Modal {
     const content = await this.app.vault.read(file);
 
     if (pass2Action.type === "replace-link") {
+      if (!pass2Action.findLink) return;
       const updated = content.replaceAll(pass2Action.findLink, wikilink);
       await this.app.vault.modify(file, updated);
     } else {
@@ -187,7 +197,7 @@ export class TriageModal extends Modal {
       const match = content.match(YAML_RE);
       if (match) {
         const newYaml = match[2].replace(
-          new RegExp(`^${pass2Action.frontmatterKey}:.*$`, "m"),
+          new RegExp(`^${escapeRegExp(pass2Action.frontmatterKey)}:.*$`, "m"),
           `${pass2Action.frontmatterKey}: "${wikilink}"`
         );
         const hadKey = newYaml !== match[2];

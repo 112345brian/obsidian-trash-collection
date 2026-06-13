@@ -185,17 +185,26 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
         })
       );
     }
-    let folderSuggest: FolderSuggest;
+    let selectedFolderPath = "";
+    let folderSuggest: FolderSuggest | null = null;
     new Setting(containerEl)
       .setName("Add folder")
       .addText((text) => {
         text.setPlaceholder("Folder path…");
         folderSuggest = new FolderSuggest(this.app, text.inputEl);
+        folderSuggest.onSelect((folder) => {
+          const path = folder.path === "/" ? "/" : folder.path + "/";
+          selectedFolderPath = path;
+          folderSuggest!.setValue(path);
+        });
       })
       .addButton((b) =>
         b.setIcon("plus").onClick(async () => {
-          const val = folderSuggest?.selectedPath ?? folderSuggest?.inputEl?.value?.trim();
-          if (!val || this.plugin.settings.excludeFolders.includes(val)) return;
+          const raw = selectedFolderPath || folderSuggest?.getValue()?.trim() || "";
+          selectedFolderPath = "";
+          if (!raw) return;
+          const val = raw.endsWith("/") ? raw : raw + "/";
+          if (this.plugin.settings.excludeFolders.includes(val)) return;
           this.plugin.settings.excludeFolders.push(val);
           await this.plugin.saveSettings();
           this.display();
@@ -213,16 +222,22 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
         })
       );
     }
-    let noteSuggest: NoteSuggest;
+    let selectedNotePath = "";
+    let noteSuggest: NoteSuggest | null = null;
     new Setting(containerEl)
       .setName("Add note")
       .addText((text) => {
         text.setPlaceholder("Note path…");
         noteSuggest = new NoteSuggest(this.app, text.inputEl);
+        noteSuggest.onSelect((file) => {
+          selectedNotePath = file.path;
+          noteSuggest!.setValue(file.path);
+        });
       })
       .addButton((b) =>
         b.setIcon("plus").onClick(async () => {
-          const val = noteSuggest?.selectedFile?.path ?? noteSuggest?.inputEl?.value?.trim();
+          const val = selectedNotePath || noteSuggest?.getValue()?.trim() || "";
+          selectedNotePath = "";
           if (!val || this.plugin.settings.excludeNotes.includes(val)) return;
           this.plugin.settings.excludeNotes.push(val);
           await this.plugin.saveSettings();

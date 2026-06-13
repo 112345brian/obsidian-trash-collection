@@ -7,7 +7,7 @@ const UNIT_MS: Record<string, number> = {
   days: 86_400_000,
 };
 
-function getAge(app: App, file: TFile, settings: TrashCollectionSettings): number {
+export function getAge(app: App, file: TFile, settings: TrashCollectionSettings): number {
   if (settings.ageField === "frontmatter") {
     const fm = app.metadataCache.getFileCache(file)?.frontmatter;
     const raw = fm?.[settings.ageFrontmatterKey];
@@ -56,8 +56,8 @@ export function getCandidates(app: App, settings: TrashCollectionSettings): TFil
       results.push(!linked.has(file.path));
     }
 
-    if (settings.frontmatterContainsLinks.length > 0 && fm) {
-      const fmValues = Object.values(fm).map((v) => String(v ?? ""));
+    if (settings.frontmatterContainsLinks.length > 0) {
+      const fmValues = fm ? Object.values(fm).map((v) => String(v ?? "")) : [];
       const hit = settings.frontmatterContainsLinks.some((link) =>
         fmValues.some((v) => v.includes(link))
       );
