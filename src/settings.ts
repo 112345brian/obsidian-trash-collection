@@ -33,8 +33,12 @@ export interface TrashCollectionSettings {
   excludeFrontmatterValues: string[];// skip if any frontmatter value contains these strings
 
   // Notification
+  notifyEnabled: boolean;
   lastNotified: number;
   notifyIntervalDays: number;
+
+  // Widget
+  blockMaxItems: number;
 
   // Pass 2
   pass2Enabled: boolean;
@@ -55,7 +59,9 @@ export const DEFAULT_SETTINGS: TrashCollectionSettings = {
   excludeNotes: [],
   excludeFrontmatterKeys: [],
   excludeFrontmatterValues: [],
+  notifyEnabled: true,
   lastNotified: 0,
+  blockMaxItems: 0,
   notifyIntervalDays: 1,
   pass2Enabled: true,
   pass2Action: {
@@ -265,21 +271,48 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
         })
       );
 
+    containerEl.createEl("h3", { text: "Startup notification" });
+
     new Setting(containerEl)
-      .setName("Notify at most every (days)")
-      .setDesc("0 = notify every launch.")
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.notifyIntervalDays)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          if (!isNaN(n) && n >= 0) { this.plugin.settings.notifyIntervalDays = n; await this.plugin.saveSettings(); }
+      .setName("Show notification on launch")
+      .setDesc("Pop up a notice when there are notes to review. Disable if you prefer to use the code block widget instead.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.notifyEnabled).onChange(async (val) => {
+          this.plugin.settings.notifyEnabled = val;
+          await this.plugin.saveSettings();
+          this.display();
         })
       );
 
-    containerEl.createEl("h3", { text: "Pass 2 — link kept notes" });
+    if (this.plugin.settings.notifyEnabled) {
+      new Setting(containerEl)
+        .setName("Notify at most every (days)")
+        .setDesc("0 = notify every launch.")
+        .addText((t) =>
+          t.setValue(String(this.plugin.settings.notifyIntervalDays)).onChange(async (v) => {
+            const n = parseInt(v, 10);
+            if (!isNaN(n) && n >= 0) { this.plugin.settings.notifyIntervalDays = n; await this.plugin.saveSettings(); }
+          })
+        );
+    }
+
+    containerEl.createEl("h3", { text: "Widget" });
 
     new Setting(containerEl)
-      .setName("Enable pass 2")
-      .setDesc("After swiping, review kept notes and link or tag them.")
+      .setName("Max items shown")
+      .setDesc('How many notes to list in the code block widget. 0 = show all. Override per block with "maxItems: 3" in the block body.')
+      .addText((t) =>
+        t.setValue(String(this.plugin.settings.blockMaxItems)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          if (!isNaN(n) && n >= 0) { this.plugin.settings.blockMaxItems = n; await this.plugin.saveSettings(); }
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Review mode" });
+
+    new Setting(containerEl)
+      .setName("Two-pass review")
+      .setDesc("Pass 1: swipe to trash or keep. Pass 2: categorize kept notes by linking them. Disable for single-pass delete-only review.")
       .addToggle((t) =>
         t.setValue(this.plugin.settings.pass2Enabled).onChange(async (val) => {
           this.plugin.settings.pass2Enabled = val;

@@ -2,6 +2,8 @@ import { Notice, Plugin } from "obsidian";
 import { TrashCollectionSettings, TrashCollectionSettingsTab, DEFAULT_SETTINGS } from "./settings";
 import { getCandidates } from "./candidates";
 import { TriageModal } from "./TriageModal";
+import { TrashCollectionBlock } from "./TrashCollectionBlock";
+import { type TrashCollectionApi, API_VERSION } from "./api";
 
 const STYLES = `
 .trash-collection-modal {
@@ -24,6 +26,46 @@ const STYLES = `
   font-weight: 700;
   color: var(--text-normal);
   margin-bottom: 3px;
+}
+.tc-card-title--link {
+  cursor: pointer;
+}
+.tc-card-title--link:hover {
+  color: var(--text-accent);
+  text-decoration: underline;
+}
+.tc-card-fm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  background: var(--background-primary-alt);
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+}
+.tc-fm-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  font-size: 0.78em;
+  min-width: 0;
+}
+.tc-fm-key {
+  color: var(--text-faint);
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.tc-fm-key::after {
+  content: ":";
+}
+.tc-fm-val {
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
 }
 .tc-card-meta {
   font-size: 0.78em;
@@ -120,13 +162,129 @@ const STYLES = `
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ── inline code block widget ───────────────────────────────────────────── */
+.tc-block {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l);
+  overflow: hidden;
+}
+.tc-block-empty {
+  padding: 12px 14px;
+  font-size: 0.85em;
+  color: var(--text-faint);
+  font-style: italic;
+}
+.tc-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.tc-block-count {
+  font-size: 0.82em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.tc-block-review-btn {
+  font-size: 0.78em;
+  padding: 3px 10px;
+  border-radius: var(--radius-m);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  cursor: pointer;
+  font-family: inherit;
+}
+.tc-block-review-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.tc-block-list {}
+.tc-block-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.tc-block-row:last-child {
+  border-bottom: none;
+}
+.tc-block-row-info {
+  flex: 1;
+  min-width: 0;
+}
+.tc-block-row-title {
+  font-size: 0.9em;
+  font-weight: 600;
+  color: var(--text-normal);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tc-block-row-title:hover {
+  color: var(--text-accent);
+  text-decoration: underline;
+}
+.tc-block-row-meta {
+  font-size: 0.75em;
+  color: var(--text-faint);
+}
+.tc-block-meta-sep {
+  margin: 0 3px;
+}
+.tc-block-row-btns {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.tc-block-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.78em;
+  font-family: inherit;
+}
+.tc-block-btn svg { width: 12px; height: 12px; }
+.tc-block-btn-cat:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.tc-block-btn-del:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+  border-color: var(--text-error);
+}
+.tc-block-overflow {
+  padding: 6px 14px;
+  font-size: 0.75em;
+  color: var(--text-faint);
+  font-style: italic;
+  border-top: 1px solid var(--background-modifier-border);
+}
 `;
 
 export default class TrashCollectionPlugin extends Plugin {
   settings: TrashCollectionSettings;
+  api: TrashCollectionApi;
 
   async onload() {
     await this.loadSettings();
+
+    this.api = {
+      version: API_VERSION,
+      getCandidates: () => getCandidates(this.app, this.settings),
+      openTriage: () => this.openTriage(),
+    };
 
     const styleEl = document.createElement("style");
     styleEl.textContent = STYLES;
@@ -143,6 +301,11 @@ export default class TrashCollectionPlugin extends Plugin {
       callback: () => this.openTriage(),
     });
 
+    this.registerMarkdownCodeBlockProcessor("trash-collection", (source, el, ctx) => {
+      const block = new TrashCollectionBlock(this.app, () => this.settings, source, el, ctx);
+      ctx.addChild(block);
+    });
+
     // Check on startup whether to notify
     this.app.workspace.onLayoutReady(() => this.maybeNotify());
   }
@@ -157,6 +320,7 @@ export default class TrashCollectionPlugin extends Plugin {
   }
 
   async maybeNotify() {
+    if (!this.settings.notifyEnabled) return;
     const { lastNotified, notifyIntervalDays, orphanAge, orphanAgeUnit } = this.settings;
     const intervalMs = notifyIntervalDays * 86_400_000;
     if (Date.now() - lastNotified < intervalMs) return;

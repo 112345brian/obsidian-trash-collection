@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.0 — 2026-06-13
+
+### Triage modal
+
+- Clicking a note title opens it in the workspace (modal stays open)
+- Frontmatter properties displayed in each card — shows all keys/values, arrays joined with commas
+- Frontmatter and body preview factored into a shared `renderNotePreview` helper used by both passes
+
+### Code block widget
+
+- New `trash-collection` fenced code block: lists flagged notes inline with Delete and Categorize buttons
+- Completely hidden when there are no candidates — no empty state shown
+- Delete button trashes the note immediately and refreshes the widget
+- Categorize button opens the full triage modal
+- Configurable max items shown: global "Max items shown" setting (0 = all, default) overridable per block with `maxItems: 3` in the block body
+- Overflow line shows `+N more` when capped
+
+### Settings
+
+- **Show notification on launch** toggle — disable if you prefer using the code block widget; when off the "notify every N days" sub-setting is hidden
+- **Two-pass review** toggle (clearer rename of "Enable pass 2") — single-pass keeps only the delete/keep swipe; two-pass adds the categorize step; Categorize button in the widget only appears when enabled
+- **Widget** section with "Max items shown" control
+
+### Public API
+
+- New `src/api.ts` exposes `TrashCollectionApi` interface, `API_VERSION` constant, and `getTrashCollectionApi(app)` safe accessor
+- Consuming plugins (e.g. Continue Note) call `getTrashCollectionApi(app)?.getCandidates()` — returns null if the plugin isn't loaded or the version doesn't match
+
 ## 0.1.0 — 2026-06-13
 
 Initial release.

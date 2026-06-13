@@ -19,7 +19,6 @@ export class TriageModal extends Modal {
   private pass2Index = 0;
 
   private startX = 0;
-  private currentCard: HTMLElement | null = null;
 
   constructor(
     app: App,
@@ -44,6 +43,35 @@ export class TriageModal extends Modal {
     else this.renderDone();
   }
 
+  // ── shared card helper ─────────────────────────────────────────────────────
+
+  private async renderNotePreview(container: HTMLElement, file: TFile): Promise<void> {
+    // Frontmatter
+    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (fm) {
+      const fmEl = container.createDiv({ cls: "tc-card-fm" });
+      for (const [key, val] of Object.entries(fm)) {
+        if (key === "position") continue;
+        const row = fmEl.createDiv({ cls: "tc-fm-row" });
+        row.createSpan({ cls: "tc-fm-key", text: key });
+        const display = Array.isArray(val)
+          ? val.join(", ")
+          : (val !== null && typeof val === "object" ? JSON.stringify(val) : String(val ?? ""));
+        row.createSpan({ cls: "tc-fm-val", text: display });
+      }
+    }
+
+    // Body snippet
+    const raw = await this.app.vault.read(file);
+    const body = raw.replace(FRONTMATTER_RE, "").trimStart();
+    const lines = body.split("\n");
+    const snippet = lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? "\n\n…" : "");
+    if (snippet.trim()) {
+      const preview = container.createDiv({ cls: "tc-card-preview" });
+      await MarkdownRenderer.render(this.app, snippet, preview, file.path, this as unknown as import("obsidian").Component);
+    }
+  }
+
   // ── Pass 1 ─────────────────────────────────────────────────────────────────
 
   private async renderPass1() {
@@ -61,11 +89,15 @@ export class TriageModal extends Modal {
     titleEl.setText(`Triage (${remaining} left)`);
 
     const card = contentEl.createDiv({ cls: "tc-card" });
-    this.currentCard = card;
     this.attachSwipe(card, () => this.pass1Keep(), () => this.pass1Trash());
 
     const header = card.createDiv({ cls: "tc-card-header" });
-    header.createDiv({ cls: "tc-card-title", text: file.basename });
+
+    const titleEl2 = header.createDiv({ cls: "tc-card-title tc-card-title--link", text: file.basename });
+    titleEl2.addEventListener("click", () => {
+      this.app.workspace.openLinkText(file.path, "", false);
+    });
+
     const meta = header.createDiv({ cls: "tc-card-meta" });
     const age = Math.floor(getAge(this.app, file, this.settings) / 86_400_000);
     meta.createSpan({ text: `${age} day${age === 1 ? "" : "s"} ago` });
@@ -74,14 +106,7 @@ export class TriageModal extends Modal {
       meta.createSpan({ text: file.parent.name });
     }
 
-    const raw = await this.app.vault.read(file);
-    const body = raw.replace(FRONTMATTER_RE, "").trimStart();
-    const lines = body.split("\n");
-    const snippet = lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? "\n\n…" : "");
-    if (snippet.trim()) {
-      const preview = card.createDiv({ cls: "tc-card-preview" });
-      await MarkdownRenderer.render(this.app, snippet, preview, file.path, this as unknown as import("obsidian").Component);
-    }
+    await this.renderNotePreview(card, file);
 
     // Buttons
     const actions = contentEl.createDiv({ cls: "tc-actions" });
@@ -126,16 +151,13 @@ export class TriageModal extends Modal {
     titleEl.setText(`Link notes (${remaining} left)`);
 
     const card = contentEl.createDiv({ cls: "tc-card" });
-    card.createDiv({ cls: "tc-card-title", text: file.basename });
 
-    const raw = await this.app.vault.read(file);
-    const body = raw.replace(FRONTMATTER_RE, "").trimStart();
-    const lines = body.split("\n");
-    const snippet = lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? "\n\n…" : "");
-    if (snippet.trim()) {
-      const preview = card.createDiv({ cls: "tc-card-preview" });
-      await MarkdownRenderer.render(this.app, snippet, preview, file.path, this as unknown as import("obsidian").Component);
-    }
+    const titleEl2 = card.createDiv({ cls: "tc-card-title tc-card-title--link", text: file.basename });
+    titleEl2.addEventListener("click", () => {
+      this.app.workspace.openLinkText(file.path, "", false);
+    });
+
+    await this.renderNotePreview(card, file);
 
     // Action UI
     const { pass2Action, shortcuts } = this.settings;
@@ -150,9 +172,9 @@ export class TriageModal extends Modal {
     input.placeholder = "Type a note name…";
     let selectedFile: TFile | null = null;
     const fileSuggest = new FileSuggest(this.app, input, shortcuts);
-    fileSuggest.onSelect((file) => {
-      selectedFile = file;
-      fileSuggest.setValue(file.basename);
+    fileSuggest.onSelect((f) => {
+      selectedFile = f;
+      fileSuggest.setValue(f.basename);
     });
 
     // Buttons
@@ -174,7 +196,6 @@ export class TriageModal extends Modal {
       await this.renderPass2();
     });
 
-    // Also submit on Enter
     input.addEventListener("keydown", async (e) => {
       if (e.key !== "Enter") return;
       applyBtn.click();
@@ -192,7 +213,6 @@ export class TriageModal extends Modal {
       const updated = content.replaceAll(pass2Action.findLink, wikilink);
       await this.app.vault.modify(file, updated);
     } else {
-      // add-frontmatter: set the key in existing frontmatter or prepend it
       const YAML_RE = /^(---\n)([\s\S]*?)(---)/;
       const match = content.match(YAML_RE);
       if (match) {
