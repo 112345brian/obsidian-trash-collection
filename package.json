@@ -1,6 +1,6 @@
 {
   "name": "obsidian-trash-collection",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production"

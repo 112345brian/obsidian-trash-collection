@@ -338,10 +338,46 @@ export default class TrashCollectionPlugin extends Plugin {
   }
 
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const data = await this.loadData() ?? {};
+
+    // migrate frontmatterContainsLinks: string[] → frontmatterConditions
+    // Reset conditionMode to "any": the old check was OR-combined into one boolean, so
+    // expanding it into N conditions must use "any" to preserve the original semantics.
+    if (Array.isArray(data.frontmatterContainsLinks) && !data.frontmatterConditions) {
+      data.frontmatterConditions = data.frontmatterContainsLinks.map((link: string) => ({ field: "any", op: "contains", value: link }));
+      delete data.frontmatterContainsLinks;
+      data.conditionMode = "any";
+    }
+
+    // migrate frontmatterLinkRules: {field, link, negate}[] → frontmatterConditions
+    if (Array.isArray(data.frontmatterLinkRules)) {
+      const existing: unknown[] = data.frontmatterConditions ?? [];
+      data.frontmatterConditions = [
+        ...existing,
+        ...data.frontmatterLinkRules.map((r: { field: string; link: string; negate: boolean }) => ({
+          field: r.field,
+          op: r.negate ? "not-contains" : "contains",
+          value: r.link,
+        })),
+      ];
+      delete data.frontmatterLinkRules;
+    }
+
+    // migrate flaggedFrontmatterKeys: string[] → frontmatterConditions
+    if (Array.isArray(data.flaggedFrontmatterKeys) && data.flaggedFrontmatterKeys.length > 0) {
+      const existing: unknown[] = data.frontmatterConditions ?? [];
+      data.frontmatterConditions = [
+        ...existing,
+        ...data.flaggedFrontmatterKeys.map((key: string) => ({ field: key, op: "equals", value: "true" })),
+      ];
+      delete data.flaggedFrontmatterKeys;
+    }
+
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+    document.dispatchEvent(new CustomEvent("trash-collection:settings-changed"));
   }
 }

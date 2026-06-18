@@ -22,6 +22,16 @@ export class TrashCollectionBlock extends MarkdownRenderChild {
 
   onload() {
     this.render();
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const handler = () => {
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => { debounceTimer = null; this.render(); }, 150);
+    };
+    document.addEventListener("trash-collection:settings-changed", handler);
+    this.register(() => {
+      document.removeEventListener("trash-collection:settings-changed", handler);
+      if (debounceTimer !== null) clearTimeout(debounceTimer);
+    });
   }
 
   private render() {

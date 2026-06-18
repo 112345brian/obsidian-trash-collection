@@ -2,10 +2,7 @@ import { App, MarkdownRenderer, Modal, TFile, setIcon } from "obsidian";
 import type { TrashCollectionSettings } from "./settings";
 import { FileSuggest } from "./FileSuggest";
 import { getAge } from "./candidates";
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
+import { updateFrontmatterField } from "./frontmatter";
 
 const FRONTMATTER_RE = /^---[\s\S]*?---\s*\n?/;
 const PREVIEW_LINES = 10;
@@ -206,27 +203,36 @@ export class TriageModal extends Modal {
 
   private async applyPass2Action(file: TFile, wikilink: string) {
     const { pass2Action } = this.settings;
-    const content = await this.app.vault.read(file);
 
     if (pass2Action.type === "replace-link") {
       if (!pass2Action.findLink) return;
-      const updated = content.replaceAll(pass2Action.findLink, wikilink);
+      const content = await this.app.vault.read(file);
+      const updated = content.split(pass2Action.findLink).join(wikilink);
       await this.app.vault.modify(file, updated);
     } else {
-      const YAML_RE = /^(---\n)([\s\S]*?)(---)/;
-      const match = content.match(YAML_RE);
-      if (match) {
-        const newYaml = match[2].replace(
-          new RegExp(`^${escapeRegExp(pass2Action.frontmatterKey)}:.*$`, "m"),
-          `${pass2Action.frontmatterKey}: "${wikilink}"`
-        );
-        const hadKey = newYaml !== match[2];
-        const yaml = hadKey ? newYaml : `${match[2]}${pass2Action.frontmatterKey}: "${wikilink}"\n`;
-        await this.app.vault.modify(file, `${match[1]}${yaml}${match[3]}${content.slice(match[0].length)}`);
-      } else {
-        await this.app.vault.modify(file, `---\n${pass2Action.frontmatterKey}: "${wikilink}"\n---\n${content}`);
-      }
+      await this.applyFrontmatterAction(file, wikilink);
     }
+  }
+
+  private async applyFrontmatterAction(file: TFile, wikilink: string) {
+    const key = this.settings.pass2Action.frontmatterKey.trim();
+    if (!key) return;
+
+    const cacheValue = this.app.metadataCache.getFileCache(file)?.frontmatter?.[key];
+    const preferList = Array.isArray(cacheValue);
+
+    try {
+      await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        const current = frontmatter[key] ?? cacheValue;
+        frontmatter[key] = Array.isArray(current) ? [wikilink] : wikilink;
+      });
+      return;
+    } catch (error) {
+      console.warn("Trash Collection: repairing frontmatter with text fallback", error);
+    }
+
+    const content = await this.app.vault.read(file);
+    await this.app.vault.modify(file, updateFrontmatterField(content, key, wikilink, preferList));
   }
 
   // ── Done ───────────────────────────────────────────────────────────────────

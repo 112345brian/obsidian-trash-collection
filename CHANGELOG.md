@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.0 — 2026-06-18
+
+### Condition system overhaul
+
+- **Frontmatter conditions** replace the old "Frontmatter contains links" and "Flagged frontmatter keys" settings. Each condition is a field / operator / value rule. Field can be a specific key (e.g. `up`) or `any` to match all fields. Operators: `contains`, `doesn't contain`, `equals`, `doesn't equal`. Old settings migrate automatically on first load.
+- **Condition mode default changed to OR** — notes matching any one condition are now flagged by default. Previously defaulted to AND (all conditions required). Matches the expected use case of "orphan OR has placeholder link."
+- **Strict orphan mode** (on by default) — a note is only considered an orphan if it has no incoming links *and* no meaningful outgoing links. "Meaningful" means links other than the targets of your `contains` conditions (e.g. `[[Unique Notes]]` is ignored when counting outgoing links). Toggle off to revert to incoming-links-only orphan detection.
+
+### Settings UI
+
+- All list-based settings (exclusions, conditions, shortcuts) are now proper add/remove rows instead of comma-separated text fields.
+
+### Widget
+
+- Code block widget now refreshes immediately when settings change — adding an exclusion or editing a condition is reflected without reloading the note.
+
+### Bug fixes
+
+- Widget no longer shows stale results after settings are changed mid-session.
+- Strict orphan detection now counts frontmatter wikilinks (such as `up`) as outgoing links, so categorized notes are not flagged only because their body has no links.
+- Pass 2 now preserves list-shaped frontmatter fields and repairs malformed list blocks created by older versions.
+
 ## 0.2.0 — 2026-06-13
 
 ### Triage modal

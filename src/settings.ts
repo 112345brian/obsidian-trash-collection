@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, normalizePath, PluginSettingTab, Setting, SettingDefinitionItem } from "obsidian";
 import { FolderSuggest, NoteSuggest } from "./FileSuggest";
 import type TrashCollectionPlugin from "./plugin";
 
@@ -6,11 +6,18 @@ export type Pass2ActionType = "replace-link" | "add-frontmatter";
 export type ConditionMode = "all" | "any";
 export type AgeField = "frontmatter" | "ctime" | "mtime";
 export type AgeUnit = "minutes" | "hours" | "days";
+export type FrontmatterOp = "contains" | "not-contains" | "equals" | "not-equals";
 
 export interface Pass2Action {
   type: Pass2ActionType;
   findLink: string;
   frontmatterKey: string;
+}
+
+export interface FrontmatterCondition {
+  field: string;        // "any" or a specific frontmatter key like "up"
+  op: FrontmatterOp;
+  value: string;
 }
 
 export interface TrashCollectionSettings {
@@ -21,16 +28,16 @@ export interface TrashCollectionSettings {
   ageFrontmatterKey: string;
 
   // Conditions
-  conditionMode: ConditionMode;          // "all" = AND, "any" = OR
+  conditionMode: ConditionMode;
   checkOrphan: boolean;
-  frontmatterContainsLinks: string[];    // flag if any frontmatter value contains these wikilinks
-  flaggedFrontmatterKeys: string[];      // flag if these keys are set to true
+  orphanRequiresNoOutgoing: boolean;
+  frontmatterConditions: FrontmatterCondition[];
 
   // Exclusions
-  excludeFolders: string[];          // path prefixes to skip, e.g. "Templates/, ARCHIVE/"
-  excludeNotes: string[];            // exact note paths to skip
-  excludeFrontmatterKeys: string[];  // skip if note has any of these keys set to true
-  excludeFrontmatterValues: string[];// skip if any frontmatter value contains these strings
+  excludeFolders: string[];
+  excludeNotes: string[];
+  excludeFrontmatterKeys: string[];
+  excludeFrontmatterValues: string[];
 
   // Notification
   notifyEnabled: boolean;
@@ -51,10 +58,10 @@ export const DEFAULT_SETTINGS: TrashCollectionSettings = {
   orphanAgeUnit: "days",
   ageField: "ctime",
   ageFrontmatterKey: "date-created",
-  conditionMode: "all",
+  conditionMode: "any",
   checkOrphan: true,
-  frontmatterContainsLinks: [],
-  flaggedFrontmatterKeys: [],
+  orphanRequiresNoOutgoing: true,
+  frontmatterConditions: [],
   excludeFolders: [],
   excludeNotes: [],
   excludeFrontmatterKeys: [],
@@ -72,325 +79,439 @@ export const DEFAULT_SETTINGS: TrashCollectionSettings = {
   shortcuts: {},
 };
 
+const OP_LABELS: Record<FrontmatterOp, string> = {
+  "contains": "contains",
+  "not-contains": "doesn't contain",
+  "equals": "equals",
+  "not-equals": "doesn't equal",
+};
+
 export class TrashCollectionSettingsTab extends PluginSettingTab {
   constructor(app: App, private plugin: TrashCollectionPlugin) {
     super(app, plugin);
   }
 
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
+  getControlValue(key: string): unknown {
+    return (this.plugin.settings as unknown as Record<string, unknown>)[key];
+  }
 
-    containerEl.createEl("h3", { text: "Detection" });
-
-    new Setting(containerEl)
-      .setName("Age field")
-      .setDesc("Which date to use when checking if a note is old enough.")
-      .addDropdown((d) =>
-        d
-          .addOption("ctime", "File created (built-in)")
-          .addOption("mtime", "File modified (built-in)")
-          .addOption("frontmatter", "Frontmatter key →")
-          .setValue(this.plugin.settings.ageField)
-          .onChange(async (val) => {
-            this.plugin.settings.ageField = val as AgeField;
-            await this.plugin.saveSettings();
-            this.display();
-          })
-      );
-
-    if (this.plugin.settings.ageField === "frontmatter") {
-      new Setting(containerEl)
-        .setName("Frontmatter key")
-        .setDesc("The frontmatter key to read the date from (e.g. date-created, created-at).")
-        .addText((t) =>
-          t.setValue(this.plugin.settings.ageFrontmatterKey).onChange(async (v) => {
-            this.plugin.settings.ageFrontmatterKey = v.trim();
-            await this.plugin.saveSettings();
-          })
-        );
+  async setControlValue(key: string, value: unknown): Promise<void> {
+    if (typeof value === "string") {
+      const def = (DEFAULT_SETTINGS as unknown as Record<string, unknown>)[key];
+      value = value.trim() || def;
     }
+    (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
+    await this.plugin.saveSettings();
+    this.update();
+  }
 
-    new Setting(containerEl)
-      .setName("Age threshold")
-      .setDesc("Only include notes older than this amount.")
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.orphanAge)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          if (!isNaN(n) && n >= 0) { this.plugin.settings.orphanAge = n; await this.plugin.saveSettings(); }
-        })
-      )
-      .addDropdown((d) =>
-        d
-          .addOption("minutes", "minutes")
-          .addOption("hours", "hours")
-          .addOption("days", "days")
-          .setValue(this.plugin.settings.orphanAgeUnit)
-          .onChange(async (val) => {
-            this.plugin.settings.orphanAgeUnit = val as AgeUnit;
-            await this.plugin.saveSettings();
-          })
-      );
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    const s = this.plugin.settings;
 
-    new Setting(containerEl)
-      .setName("Condition mode")
-      .setDesc('"Any" flags notes matching at least one condition (OR). "All" requires every enabled condition (AND).')
-      .addDropdown((d) =>
-        d
-          .addOption("any", "Any condition (OR)")
-          .addOption("all", "All conditions (AND)")
-          .setValue(this.plugin.settings.conditionMode)
-          .onChange(async (val) => {
-            this.plugin.settings.conditionMode = val as ConditionMode;
-            await this.plugin.saveSettings();
-          })
-      );
+    return [
+      // ── Detection ──────────────────────────────────────────────────────
+      {
+        name: "Detection",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        name: "Age field",
+        desc: "Which date to use when checking if a note is old enough.",
+        control: {
+          type: "dropdown" as const,
+          key: "ageField",
+          options: { ctime: "File created (built-in)", mtime: "File modified (built-in)", frontmatter: "Frontmatter key →" },
+        },
+      },
+      {
+        name: "Frontmatter key",
+        desc: "The frontmatter key to read the date from (e.g. date-created).",
+        visible: () => s.ageField === "frontmatter",
+        control: { type: "text" as const, key: "ageFrontmatterKey" },
+      },
+      {
+        name: "Age threshold",
+        desc: "Only include notes older than this amount.",
+        render: (el: Setting): (() => void) | void => {
+          el.addText((t) => {
+            t.setValue(String(s.orphanAge)).onChange(async (v) => {
+              const n = parseInt(v, 10);
+              if (!isNaN(n) && n >= 0) {
+                this.plugin.settings.orphanAge = n;
+                await this.plugin.saveSettings();
+              }
+            });
+          }).addDropdown((d) => {
+            d.addOption("minutes", "minutes")
+              .addOption("hours", "hours")
+              .addOption("days", "days")
+              .setValue(s.orphanAgeUnit)
+              .onChange(async (val) => {
+                this.plugin.settings.orphanAgeUnit = val as AgeUnit;
+                await this.plugin.saveSettings();
+              });
+          });
+        },
+      },
+      {
+        name: "Condition mode",
+        desc: '"Any" flags notes matching at least one condition (OR). "All" requires every enabled condition (AND).',
+        control: {
+          type: "dropdown" as const,
+          key: "conditionMode",
+          options: { any: "Any condition (OR)", all: "All conditions (AND)" },
+        },
+      },
+      {
+        name: "Orphan check",
+        desc: "Flag notes with no incoming links.",
+        control: { type: "toggle" as const, key: "checkOrphan" },
+      },
+      {
+        name: "Strict orphan",
+        desc: "Also require no outgoing links (ignoring placeholder link targets from conditions below).",
+        visible: () => s.checkOrphan,
+        control: { type: "toggle" as const, key: "orphanRequiresNoOutgoing" },
+      },
 
-    new Setting(containerEl)
-      .setName("Orphan check")
-      .setDesc("Include notes with no incoming links.")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.checkOrphan).onChange(async (val) => {
-          this.plugin.settings.checkOrphan = val;
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Frontmatter contains links")
-      .setDesc('Comma-separated wikilinks. Flag notes where any frontmatter value contains one of these (e.g. "[[Unique Notes]]").')
-      .addText((t) =>
-        t
-          .setValue(this.plugin.settings.frontmatterContainsLinks.join(", "))
-          .onChange(async (v) => {
-            this.plugin.settings.frontmatterContainsLinks = v.split(",").map((s) => s.trim()).filter(Boolean);
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Flagged frontmatter keys")
-      .setDesc('Comma-separated keys. Flag notes where any of these keys are set to true (e.g. "draft, stale").')
-      .addText((t) =>
-        t.setValue(this.plugin.settings.flaggedFrontmatterKeys.join(", ")).onChange(async (v) => {
-          this.plugin.settings.flaggedFrontmatterKeys = v.split(",").map((s) => s.trim()).filter(Boolean);
-          await this.plugin.saveSettings();
-        })
-      );
-
-    containerEl.createEl("h3", { text: "Exclusions" });
-
-    // Exclude folders
-    containerEl.createEl("h4", { text: "Exclude folders" });
-    for (const folder of this.plugin.settings.excludeFolders) {
-      new Setting(containerEl).setName(folder).addButton((b) =>
-        b.setIcon("x").onClick(async () => {
-          this.plugin.settings.excludeFolders = this.plugin.settings.excludeFolders.filter((f) => f !== folder);
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    }
-    let selectedFolderPath = "";
-    let folderSuggest: FolderSuggest | null = null;
-    new Setting(containerEl)
-      .setName("Add folder")
-      .addText((text) => {
-        text.setPlaceholder("Folder path…");
-        folderSuggest = new FolderSuggest(this.app, text.inputEl);
-        folderSuggest.onSelect((folder) => {
-          const path = folder.path === "/" ? "/" : folder.path + "/";
-          selectedFolderPath = path;
-          folderSuggest!.setValue(path);
-        });
-      })
-      .addButton((b) =>
-        b.setIcon("plus").onClick(async () => {
-          const raw = selectedFolderPath || folderSuggest?.getValue()?.trim() || "";
-          selectedFolderPath = "";
-          if (!raw) return;
-          const val = raw.endsWith("/") ? raw : raw + "/";
-          if (this.plugin.settings.excludeFolders.includes(val)) return;
-          this.plugin.settings.excludeFolders.push(val);
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-
-    // Exclude notes
-    containerEl.createEl("h4", { text: "Exclude notes" });
-    for (const note of this.plugin.settings.excludeNotes) {
-      new Setting(containerEl).setName(note).addButton((b) =>
-        b.setIcon("x").onClick(async () => {
-          this.plugin.settings.excludeNotes = this.plugin.settings.excludeNotes.filter((n) => n !== note);
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    }
-    let selectedNotePath = "";
-    let noteSuggest: NoteSuggest | null = null;
-    new Setting(containerEl)
-      .setName("Add note")
-      .addText((text) => {
-        text.setPlaceholder("Note path…");
-        noteSuggest = new NoteSuggest(this.app, text.inputEl);
-        noteSuggest.onSelect((file) => {
-          selectedNotePath = file.path;
-          noteSuggest!.setValue(file.path);
-        });
-      })
-      .addButton((b) =>
-        b.setIcon("plus").onClick(async () => {
-          const val = selectedNotePath || noteSuggest?.getValue()?.trim() || "";
-          selectedNotePath = "";
-          if (!val || this.plugin.settings.excludeNotes.includes(val)) return;
-          this.plugin.settings.excludeNotes.push(val);
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Exclude by frontmatter key")
-      .setDesc("Skip notes where any of these keys are set to true (e.g. permanent, keep).")
-      .addText((t) =>
-        t.setValue(this.plugin.settings.excludeFrontmatterKeys.join(", ")).onChange(async (v) => {
-          this.plugin.settings.excludeFrontmatterKeys = v.split(",").map((s) => s.trim()).filter(Boolean);
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Exclude by frontmatter value")
-      .setDesc("Skip notes where any frontmatter value contains these strings (e.g. [[Home]], [[MOC]]).")
-      .addText((t) =>
-        t.setValue(this.plugin.settings.excludeFrontmatterValues.join(", ")).onChange(async (v) => {
-          this.plugin.settings.excludeFrontmatterValues = v.split(",").map((s) => s.trim()).filter(Boolean);
-          await this.plugin.saveSettings();
-        })
-      );
-
-    containerEl.createEl("h3", { text: "Startup notification" });
-
-    new Setting(containerEl)
-      .setName("Show notification on launch")
-      .setDesc("Pop up a notice when there are notes to review. Disable if you prefer to use the code block widget instead.")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.notifyEnabled).onChange(async (val) => {
-          this.plugin.settings.notifyEnabled = val;
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-
-    if (this.plugin.settings.notifyEnabled) {
-      new Setting(containerEl)
-        .setName("Notify at most every (days)")
-        .setDesc("0 = notify every launch.")
-        .addText((t) =>
-          t.setValue(String(this.plugin.settings.notifyIntervalDays)).onChange(async (v) => {
-            const n = parseInt(v, 10);
-            if (!isNaN(n) && n >= 0) { this.plugin.settings.notifyIntervalDays = n; await this.plugin.saveSettings(); }
-          })
-        );
-    }
-
-    containerEl.createEl("h3", { text: "Widget" });
-
-    new Setting(containerEl)
-      .setName("Max items shown")
-      .setDesc('How many notes to list in the code block widget. 0 = show all. Override per block with "maxItems: 3" in the block body.')
-      .addText((t) =>
-        t.setValue(String(this.plugin.settings.blockMaxItems)).onChange(async (v) => {
-          const n = parseInt(v, 10);
-          if (!isNaN(n) && n >= 0) { this.plugin.settings.blockMaxItems = n; await this.plugin.saveSettings(); }
-        })
-      );
-
-    containerEl.createEl("h3", { text: "Review mode" });
-
-    new Setting(containerEl)
-      .setName("Two-pass review")
-      .setDesc("Pass 1: swipe to trash or keep. Pass 2: categorize kept notes by linking them. Disable for single-pass delete-only review.")
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.pass2Enabled).onChange(async (val) => {
-          this.plugin.settings.pass2Enabled = val;
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-
-    if (this.plugin.settings.pass2Enabled) {
-      new Setting(containerEl)
-        .setName("Action")
-        .setDesc("What to do with the chosen note for each kept file.")
-        .addDropdown((d) =>
-          d
-            .addOption("replace-link", "Replace a link in the note body")
-            .addOption("add-frontmatter", "Set a frontmatter key")
-            .setValue(this.plugin.settings.pass2Action.type)
-            .onChange(async (val) => {
-              this.plugin.settings.pass2Action.type = val as Pass2ActionType;
+      // ── Frontmatter conditions ──────────────────────────────────────────
+      {
+        name: "Frontmatter conditions",
+        desc: 'Flag notes based on frontmatter rules. Use "any" to match any field.',
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No conditions.",
+        items: s.frontmatterConditions.map((c) => ({
+          name: `${c.field}  ${OP_LABELS[c.op]}  ${c.value}`,
+        })),
+        onDelete: (index: number) => {
+          this.plugin.settings.frontmatterConditions.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add condition",
+        render: (el: Setting): (() => void) | void => {
+          let field = "any";
+          let op: FrontmatterOp = "contains";
+          let value = "";
+          el.addText((t) => {
+            t.setPlaceholder('field (or "any")').setValue("any")
+              .onChange((v) => { field = v.trim() || "any"; });
+          }).addDropdown((d) => {
+            d.addOption("contains", "contains")
+              .addOption("not-contains", "doesn't contain")
+              .addOption("equals", "equals")
+              .addOption("not-equals", "doesn't equal")
+              .onChange((v) => { op = v as FrontmatterOp; });
+          }).addText((t) => {
+            t.setPlaceholder("[[Unique Notes]]").onChange((v) => { value = v.trim(); });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              if (!value) return;
+              this.plugin.settings.frontmatterConditions.push({ field, op, value });
               await this.plugin.saveSettings();
-              this.display();
-            })
-        );
+              this.update();
+            });
+          });
+        },
+      },
 
-      if (this.plugin.settings.pass2Action.type === "replace-link") {
-        new Setting(containerEl)
-          .setName("Link to replace")
-          .setDesc('Wikilink placeholder to swap out, e.g. [[Unique Notes]]')
-          .addText((t) =>
-            t.setValue(this.plugin.settings.pass2Action.findLink).onChange(async (v) => {
+      // ── Exclusions ─────────────────────────────────────────────────────
+      {
+        name: "Exclusions",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+
+      // Folders
+      {
+        name: "Exclude folders",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No folders excluded.",
+        items: s.excludeFolders.map((f) => ({ name: f })),
+        onDelete: (index: number) => {
+          this.plugin.settings.excludeFolders.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add folder",
+        render: (el: Setting): (() => void) | void => {
+          let suggest: FolderSuggest | null = null;
+          el.addText((t) => {
+            t.setPlaceholder("Folder path…");
+            suggest = new FolderSuggest(this.app, t.inputEl);
+            suggest.onSelect((folder) => {
+              const normalized = (folder.path === "/" ? "/" : normalizePath(folder.path)) + "/";
+              suggest!.setValue(normalized);
+            });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              const raw = suggest?.getValue()?.trim() ?? "";
+              if (!raw) return;
+              const base = normalizePath(raw.endsWith("/") ? raw.slice(0, -1) : raw);
+              const normalized = base === "/" ? "/" : base + "/";
+              if (this.plugin.settings.excludeFolders.includes(normalized)) return;
+              this.plugin.settings.excludeFolders.push(normalized);
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+          return () => suggest?.close();
+        },
+      },
+
+      // Notes
+      {
+        name: "Exclude notes",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No notes excluded.",
+        items: s.excludeNotes.map((n) => ({ name: n })),
+        onDelete: (index: number) => {
+          this.plugin.settings.excludeNotes.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add note",
+        render: (el: Setting): (() => void) | void => {
+          let suggest: NoteSuggest | null = null;
+          el.addText((t) => {
+            t.setPlaceholder("Note path…");
+            suggest = new NoteSuggest(this.app, t.inputEl);
+            suggest.onSelect((file) => { suggest!.setValue(file.path); });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              const val = suggest?.getValue()?.trim() ?? "";
+              if (!val || this.plugin.settings.excludeNotes.includes(val)) return;
+              this.plugin.settings.excludeNotes.push(val);
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+          return () => suggest?.close();
+        },
+      },
+
+      // Frontmatter key exclusions
+      {
+        name: "Exclude by frontmatter key",
+        desc: "Skip notes where any of these keys are set to true.",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No keys.",
+        items: s.excludeFrontmatterKeys.map((k) => ({ name: k })),
+        onDelete: (index: number) => {
+          this.plugin.settings.excludeFrontmatterKeys.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add key",
+        render: (el: Setting): (() => void) | void => {
+          let value = "";
+          el.addText((t) => {
+            t.setPlaceholder("permanent").onChange((v) => { value = v.trim(); });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              if (!value || this.plugin.settings.excludeFrontmatterKeys.includes(value)) return;
+              this.plugin.settings.excludeFrontmatterKeys.push(value);
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+        },
+      },
+
+      // Frontmatter value exclusions
+      {
+        name: "Exclude by frontmatter value",
+        desc: "Skip notes where any frontmatter value contains these strings.",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No values.",
+        items: s.excludeFrontmatterValues.map((v) => ({ name: v })),
+        onDelete: (index: number) => {
+          this.plugin.settings.excludeFrontmatterValues.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add value",
+        render: (el: Setting): (() => void) | void => {
+          let value = "";
+          el.addText((t) => {
+            t.setPlaceholder("[[Home]]").onChange((v) => { value = v.trim(); });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              if (!value || this.plugin.settings.excludeFrontmatterValues.includes(value)) return;
+              this.plugin.settings.excludeFrontmatterValues.push(value);
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+        },
+      },
+
+      // ── Startup notification ────────────────────────────────────────────
+      {
+        name: "Startup notification",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        name: "Show notification on launch",
+        desc: "Pop up a notice when there are notes to review. Disable if you prefer the code block widget.",
+        control: { type: "toggle" as const, key: "notifyEnabled" },
+      },
+      {
+        name: "Notify at most every (days)",
+        desc: "0 = notify every launch.",
+        visible: () => s.notifyEnabled,
+        render: (el: Setting): (() => void) | void => {
+          el.addText((t) => {
+            t.setValue(String(s.notifyIntervalDays)).onChange(async (v) => {
+              const n = parseInt(v, 10);
+              if (!isNaN(n) && n >= 0) {
+                this.plugin.settings.notifyIntervalDays = n;
+                await this.plugin.saveSettings();
+              }
+            });
+          });
+        },
+      },
+
+      // ── Widget ─────────────────────────────────────────────────────────
+      {
+        name: "Widget",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        name: "Max items shown",
+        desc: 'How many notes to list in the code block widget. 0 = show all. Override per block with "maxItems: 3" in the block body.',
+        render: (el: Setting): (() => void) | void => {
+          el.addText((t) => {
+            t.setValue(String(s.blockMaxItems)).onChange(async (v) => {
+              const n = parseInt(v, 10);
+              if (!isNaN(n) && n >= 0) {
+                this.plugin.settings.blockMaxItems = n;
+                await this.plugin.saveSettings();
+              }
+            });
+          });
+        },
+      },
+
+      // ── Review mode ────────────────────────────────────────────────────
+      {
+        name: "Review mode",
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        name: "Two-pass review",
+        desc: "Pass 1: swipe to trash or keep. Pass 2: categorize kept notes by linking them.",
+        control: { type: "toggle" as const, key: "pass2Enabled" },
+      },
+      {
+        name: "Action",
+        desc: "What to do with the chosen note for each kept file.",
+        visible: () => s.pass2Enabled,
+        render: (el: Setting): (() => void) | void => {
+          el.addDropdown((d) => {
+            d.addOption("replace-link", "Replace a link in the note body")
+              .addOption("add-frontmatter", "Set a frontmatter key")
+              .setValue(s.pass2Action.type)
+              .onChange(async (val) => {
+                this.plugin.settings.pass2Action.type = val as Pass2ActionType;
+                await this.plugin.saveSettings();
+                this.update();
+              });
+          });
+        },
+      },
+      {
+        name: "Link to replace",
+        desc: "Wikilink placeholder to swap out, e.g. [[Unique Notes]]",
+        visible: () => s.pass2Enabled && s.pass2Action.type === "replace-link",
+        render: (el: Setting): (() => void) | void => {
+          el.addText((t) => {
+            t.setValue(s.pass2Action.findLink).onChange(async (v) => {
               this.plugin.settings.pass2Action.findLink = v.trim();
               await this.plugin.saveSettings();
-            })
-          );
-      } else {
-        new Setting(containerEl)
-          .setName("Frontmatter key")
-          .setDesc('Key to set to the chosen wikilink, e.g. "up".')
-          .addText((t) =>
-            t.setValue(this.plugin.settings.pass2Action.frontmatterKey).onChange(async (v) => {
+            });
+          });
+        },
+      },
+      {
+        name: "Frontmatter key",
+        desc: 'Key to set to the chosen wikilink, e.g. "up".',
+        visible: () => s.pass2Enabled && s.pass2Action.type === "add-frontmatter",
+        render: (el: Setting): (() => void) | void => {
+          el.addText((t) => {
+            t.setValue(s.pass2Action.frontmatterKey).onChange(async (v) => {
               this.plugin.settings.pass2Action.frontmatterKey = v.trim();
               await this.plugin.saveSettings();
-            })
-          );
-      }
+            });
+          });
+        },
+      },
 
-      containerEl.createEl("h4", { text: "Shortcuts" });
-      containerEl.createEl("p", {
-        text: 'Short aliases for note names in pass 2. e.g. "ref" → "Reference".',
-        cls: "setting-item-description",
-      });
-
-      for (const [alias, target] of Object.entries(this.plugin.settings.shortcuts)) {
-        new Setting(containerEl)
-          .setName(alias)
-          .setDesc(`→ ${target}`)
-          .addButton((b) =>
-            b.setIcon("trash").setWarning().onClick(async () => {
-              delete this.plugin.settings.shortcuts[alias];
-              await this.plugin.saveSettings();
-              this.display();
-            })
-          );
-      }
-
-      let newAlias = "";
-      let newTarget = "";
-      const addSetting = new Setting(containerEl).setName("Add shortcut");
-      addSetting.addText((t) => t.setPlaceholder("alias").onChange((v) => { newAlias = v.trim(); }));
-      addSetting.addText((t) => t.setPlaceholder("note name").onChange((v) => { newTarget = v.trim(); }));
-      addSetting.addButton((b) =>
-        b.setIcon("plus").onClick(async () => {
-          if (!newAlias || !newTarget) return;
-          this.plugin.settings.shortcuts[newAlias] = newTarget;
-          await this.plugin.saveSettings();
-          this.display();
-        })
-      );
-    }
+      // Shortcuts
+      {
+        name: "Shortcuts",
+        desc: 'Short aliases for note names in pass 2. e.g. "ref" → "Reference".',
+        visible: () => s.pass2Enabled,
+        render: (el: Setting) => { el.setHeading(); },
+      },
+      {
+        type: "list" as const,
+        visible: () => s.pass2Enabled,
+        emptyState: "No shortcuts.",
+        items: Object.entries(s.shortcuts).map(([alias, target]) => ({
+          name: alias,
+          desc: `→ ${target}`,
+        })),
+        onDelete: (index: number) => {
+          const alias = Object.keys(this.plugin.settings.shortcuts)[index];
+          if (alias) delete this.plugin.settings.shortcuts[alias];
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add shortcut",
+        visible: () => s.pass2Enabled,
+        render: (el: Setting): (() => void) | void => {
+          let alias = "";
+          let target = "";
+          el.addText((t) => { t.setPlaceholder("alias").onChange((v) => { alias = v.trim(); }); })
+            .addText((t) => { t.setPlaceholder("note name").onChange((v) => { target = v.trim(); }); })
+            .addButton((b) => {
+              b.setIcon("plus").onClick(async () => {
+                if (!alias || !target) return;
+                this.plugin.settings.shortcuts[alias] = target;
+                await this.plugin.saveSettings();
+                this.update();
+              });
+            });
+        },
+      },
+    ];
   }
 }
