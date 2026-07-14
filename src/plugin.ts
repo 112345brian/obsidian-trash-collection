@@ -373,6 +373,17 @@ export default class TrashCollectionPlugin extends Plugin {
       delete data.flaggedFrontmatterKeys;
     }
 
+    // migrate flat frontmatterConditions: FrontmatterCondition[] → conditionGroups
+    // Wrap the old flat list in one group whose mode matches the old conditionMode.
+    // Since the group's internal mode equals the top-level mode, the orphan + group
+    // combination is associative and produces the identical result to before.
+    if (Array.isArray(data.frontmatterConditions) && !data.conditionGroups) {
+      data.conditionGroups = data.frontmatterConditions.length > 0
+        ? [{ mode: data.conditionMode ?? "any", conditions: data.frontmatterConditions }]
+        : [];
+      delete data.frontmatterConditions;
+    }
+
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
   }
 

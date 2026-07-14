@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Condition groups & presence operators
+
+- **Condition groups** — frontmatter conditions are now organized into groups. Each group has its own match mode (**any** / **all**), and the groups are combined by the top-level **Combine groups** setting (formerly "Condition mode"). This lets a single rule mix OR and AND — e.g. flag a note when it's *uncategorized* (`instance-of` empty AND `part-of` empty) **OR** *still holds a placeholder* (`instance-of` OR `part-of` contains `[[Unique Notes]]`). Existing flat conditions migrate automatically into one group that preserves the old behavior.
+- **New operators** `is filled in` and `is empty` — test whether a field has a value at all, independent of what that value is. Empty strings, empty arrays, and absent keys count as empty.
+
 ## 0.3.0 — 2026-06-18
 
 ### Condition system overhaul

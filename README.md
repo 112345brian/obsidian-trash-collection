@@ -60,24 +60,27 @@ Type a shortcut alias (configured in settings) to quickly resolve common parent 
 |---|---|
 | Age field | Which date to use: file created, file modified, or a frontmatter key |
 | Age threshold | Only flag notes older than this (minutes / hours / days) |
-| Condition mode | **Any (OR)** — flag if any condition matches. **All (AND)** — require all conditions. |
+| Combine groups | **Any (OR)** — flag if any group (or the orphan check) matches. **All (AND)** — require every group and the orphan check. |
 | Orphan check | Flag notes with no incoming wikilinks |
 | Strict orphan | Require no outgoing links either (ignoring placeholder link targets). On by default. |
-| Frontmatter conditions | One or more field / operator / value rules (see below) |
+| Frontmatter conditions | One or more **condition groups** (see below) |
 
 #### Frontmatter conditions
 
-Each condition has three parts:
+Conditions are organized into **groups**. Each group has its own match mode — **Match any (OR)** or **Match all (AND)** — and the groups are then combined by the top-level **Combine groups** setting. This two-level structure lets you mix OR and AND in a single rule.
+
+Each condition inside a group has three parts:
 
 - **Field** — a frontmatter key to check (e.g. `up`, `status`) or `any` to check all fields
-- **Operator** — `contains`, `doesn't contain`, `equals`, `doesn't equal`
-- **Value** — the string to match (e.g. `[[Unique Notes]]`, `draft`, `true`)
+- **Operator** — `contains`, `doesn't contain`, `equals`, `doesn't equal`, `is filled in`, `is empty`
+- **Value** — the string to match (e.g. `[[Unique Notes]]`, `draft`, `true`). Ignored for `is filled in` / `is empty`, which only test whether the field has a value.
 
-Example: flag notes whose `up` field still points to the default placeholder:
+**Example** — treat a note as trash if it's uncategorized *or* still holds a placeholder link. Set **Combine groups: Any (OR)** and add two groups:
 
-```
-field: up   operator: contains   value: [[Unique Notes]]
-```
+- **Group 1 — Match all (AND):** `instance-of is empty` · `part-of is empty`
+- **Group 2 — Match any (OR):** `instance-of contains [[Unique Notes]]` · `part-of contains [[Unique Notes]]`
+
+A note is flagged when *both* `instance-of` and `part-of` are empty, **or** when *either* one still points at `[[Unique Notes]]`.
 
 The `contains` conditions' link targets are also used by strict orphan mode to identify "placeholder" outgoing links that don't count as real connections.
 

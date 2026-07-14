@@ -3,7 +3,8 @@
   "version": "0.3.0",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "node esbuild.config.mjs production"
+    "build": "node esbuild.config.mjs production",
+    "test": "esbuild src/conditions.test.ts --bundle --platform=node --format=esm --outfile=.test-bundle.mjs && node --test .test-bundle.mjs && rm -f .test-bundle.mjs"
   },
   "devDependencies": {
     "@types/node": "^16.11.6",

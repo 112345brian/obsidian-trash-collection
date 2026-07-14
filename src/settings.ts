@@ -6,7 +6,16 @@ export type Pass2ActionType = "replace-link" | "add-frontmatter";
 export type ConditionMode = "all" | "any";
 export type AgeField = "frontmatter" | "ctime" | "mtime";
 export type AgeUnit = "minutes" | "hours" | "days";
-export type FrontmatterOp = "contains" | "not-contains" | "equals" | "not-equals";
+export type FrontmatterOp =
+  | "contains"
+  | "not-contains"
+  | "equals"
+  | "not-equals"
+  | "is-set"
+  | "is-empty";
+
+// Operators that test presence only — the value field is ignored for these.
+export const VALUELESS_OPS: FrontmatterOp[] = ["is-set", "is-empty"];
 
 export interface Pass2Action {
   type: Pass2ActionType;
@@ -20,6 +29,13 @@ export interface FrontmatterCondition {
   value: string;
 }
 
+// A group of conditions combined by its own mode. Groups let you mix OR and AND:
+// e.g. group A (any) = "up is set OR area is set", group B (all) = "up ≠ Inbox AND up ≠ Trash".
+export interface ConditionGroup {
+  mode: ConditionMode;
+  conditions: FrontmatterCondition[];
+}
+
 export interface TrashCollectionSettings {
   // Age
   orphanAge: number;
@@ -31,7 +47,7 @@ export interface TrashCollectionSettings {
   conditionMode: ConditionMode;
   checkOrphan: boolean;
   orphanRequiresNoOutgoing: boolean;
-  frontmatterConditions: FrontmatterCondition[];
+  conditionGroups: ConditionGroup[];
 
   // Exclusions
   excludeFolders: string[];
@@ -61,7 +77,7 @@ export const DEFAULT_SETTINGS: TrashCollectionSettings = {
   conditionMode: "any",
   checkOrphan: true,
   orphanRequiresNoOutgoing: true,
-  frontmatterConditions: [],
+  conditionGroups: [],
   excludeFolders: [],
   excludeNotes: [],
   excludeFrontmatterKeys: [],
@@ -84,6 +100,8 @@ const OP_LABELS: Record<FrontmatterOp, string> = {
   "not-contains": "doesn't contain",
   "equals": "equals",
   "not-equals": "doesn't equal",
+  "is-set": "is filled in",
+  "is-empty": "is empty",
 };
 
 export class TrashCollectionSettingsTab extends PluginSettingTab {
@@ -103,6 +121,80 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
     (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
     await this.plugin.saveSettings();
     this.update();
+  }
+
+  // One block of definitions per condition group: a header (group mode + delete),
+  // the group's conditions as a delete-able list, and an "add condition" row scoped
+  // to that group. Flattened into the main definitions list.
+  conditionGroupDefinitions(): SettingDefinitionItem[] {
+    const groups = this.plugin.settings.conditionGroups;
+    if (groups.length === 0) {
+      return [{ type: "list" as const, emptyState: "No condition groups. Add one to flag notes by frontmatter.", items: [] }];
+    }
+
+    return groups.flatMap((group, gi): SettingDefinitionItem[] => [
+      {
+        name: `Group ${gi + 1}`,
+        desc: group.mode === "all" ? "Match all conditions in this group (AND)." : "Match any condition in this group (OR).",
+        render: (el: Setting): void => {
+          el.addDropdown((d) => {
+            d.addOption("all", "Match all (AND)")
+              .addOption("any", "Match any (OR)")
+              .setValue(group.mode)
+              .onChange(async (v) => {
+                group.mode = v as ConditionMode;
+                await this.plugin.saveSettings();
+                this.update();
+              });
+          }).addExtraButton((b) => {
+            b.setIcon("trash").setTooltip("Delete group").onClick(async () => {
+              this.plugin.settings.conditionGroups.splice(gi, 1);
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+        },
+      },
+      {
+        type: "list" as const,
+        emptyState: "No conditions in this group.",
+        items: group.conditions.map((c) => ({
+          name: VALUELESS_OPS.includes(c.op)
+            ? `${c.field}  ${OP_LABELS[c.op]}`
+            : `${c.field}  ${OP_LABELS[c.op]}  ${c.value}`,
+        })),
+        onDelete: (index: number) => {
+          group.conditions.splice(index, 1);
+          this.update();
+          void this.plugin.saveSettings();
+        },
+      },
+      {
+        name: "Add condition",
+        render: (el: Setting): void => {
+          let field = "any";
+          let op: FrontmatterOp = "contains";
+          let value = "";
+          el.addText((t) => {
+            t.setPlaceholder('field (or "any")').setValue("any")
+              .onChange((v) => { field = v.trim() || "any"; });
+          }).addDropdown((d) => {
+            for (const o of Object.keys(OP_LABELS) as FrontmatterOp[]) d.addOption(o, OP_LABELS[o]);
+            d.onChange((v) => { op = v as FrontmatterOp; });
+          }).addText((t) => {
+            t.setPlaceholder("[[Unique Notes]]").onChange((v) => { value = v.trim(); });
+          }).addButton((b) => {
+            b.setIcon("plus").onClick(async () => {
+              // Presence operators need no value; everything else does.
+              if (!VALUELESS_OPS.includes(op) && !value) return;
+              group.conditions.push({ field, op, value: VALUELESS_OPS.includes(op) ? "" : value });
+              await this.plugin.saveSettings();
+              this.update();
+            });
+          });
+        },
+      },
+    ]);
   }
 
   getSettingDefinitions(): SettingDefinitionItem[] {
@@ -154,12 +246,12 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
         },
       },
       {
-        name: "Condition mode",
-        desc: '"Any" flags notes matching at least one condition (OR). "All" requires every enabled condition (AND).',
+        name: "Combine groups",
+        desc: '"Any" flags a note matching at least one group or the orphan check (OR). "All" requires every group and the orphan check (AND).',
         control: {
           type: "dropdown" as const,
           key: "conditionMode",
-          options: { any: "Any condition (OR)", all: "All conditions (AND)" },
+          options: { any: "Any group (OR)", all: "All groups (AND)" },
         },
       },
       {
@@ -177,42 +269,16 @@ export class TrashCollectionSettingsTab extends PluginSettingTab {
       // ── Frontmatter conditions ──────────────────────────────────────────
       {
         name: "Frontmatter conditions",
-        desc: 'Flag notes based on frontmatter rules. Use "any" to match any field.',
+        desc: 'Flag notes based on frontmatter rules, organized into groups. Each group is combined by its own Any/All mode; groups are then combined by "Combine groups" above. Use "any" as the field to match any frontmatter key.',
         render: (el: Setting) => { el.setHeading(); },
       },
+      ...this.conditionGroupDefinitions(),
       {
-        type: "list" as const,
-        emptyState: "No conditions.",
-        items: s.frontmatterConditions.map((c) => ({
-          name: `${c.field}  ${OP_LABELS[c.op]}  ${c.value}`,
-        })),
-        onDelete: (index: number) => {
-          this.plugin.settings.frontmatterConditions.splice(index, 1);
-          this.update();
-          void this.plugin.saveSettings();
-        },
-      },
-      {
-        name: "Add condition",
+        name: "Add group",
         render: (el: Setting): (() => void) | void => {
-          let field = "any";
-          let op: FrontmatterOp = "contains";
-          let value = "";
-          el.addText((t) => {
-            t.setPlaceholder('field (or "any")').setValue("any")
-              .onChange((v) => { field = v.trim() || "any"; });
-          }).addDropdown((d) => {
-            d.addOption("contains", "contains")
-              .addOption("not-contains", "doesn't contain")
-              .addOption("equals", "equals")
-              .addOption("not-equals", "doesn't equal")
-              .onChange((v) => { op = v as FrontmatterOp; });
-          }).addText((t) => {
-            t.setPlaceholder("[[Unique Notes]]").onChange((v) => { value = v.trim(); });
-          }).addButton((b) => {
-            b.setIcon("plus").onClick(async () => {
-              if (!value) return;
-              this.plugin.settings.frontmatterConditions.push({ field, op, value });
+          el.addButton((b) => {
+            b.setButtonText("Add group").setIcon("plus").onClick(async () => {
+              this.plugin.settings.conditionGroups.push({ mode: "all", conditions: [] });
               await this.plugin.saveSettings();
               this.update();
             });
