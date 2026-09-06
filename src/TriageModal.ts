@@ -1,4 +1,4 @@
-import { App, MarkdownRenderer, Modal, TFile, setIcon } from "obsidian";
+import { App, Component, MarkdownRenderer, Modal, Notice, TFile, setIcon } from "obsidian";
 import type { TrashCollectionSettings } from "./settings";
 import { FileSuggest } from "./FileSuggest";
 import { getAge } from "./candidates";
@@ -16,6 +16,10 @@ export class TriageModal extends Modal {
   private pass2Index = 0;
 
   private startX = 0;
+  private actionInProgress = false;
+  private controlsReady = false;
+  private renderGeneration = 0;
+  private readonly previewComponent = new Component();
 
   constructor(
     app: App,
@@ -27,16 +31,19 @@ export class TriageModal extends Modal {
 
   onOpen() {
     this.modalEl.addClass("trash-collection-modal");
-    this.render();
-    this.scope.register([], "ArrowRight", () => { if (this.phase === "pass1") this.pass1Keep(); return false; });
-    this.scope.register([], "ArrowLeft",  () => { if (this.phase === "pass1") this.pass1Trash(); return false; });
+    this.previewComponent.load();
+    void this.render();
+    this.scope.register([], "ArrowRight", () => { if (this.phase === "pass1") void this.pass1Keep(); return false; });
+    this.scope.register([], "ArrowLeft",  () => { if (this.phase === "pass1") void this.pass1Trash(); return false; });
   }
 
   // ── render dispatcher ──────────────────────────────────────────────────────
 
   private async render() {
-    if (this.phase === "pass1") await this.renderPass1();
-    else if (this.phase === "pass2") await this.renderPass2();
+    const generation = ++this.renderGeneration;
+    this.controlsReady = false;
+    if (this.phase === "pass1") await this.renderPass1(generation);
+    else if (this.phase === "pass2") await this.renderPass2(generation);
     else this.renderDone();
   }
 
@@ -59,19 +66,19 @@ export class TriageModal extends Modal {
     }
 
     // Body snippet
-    const raw = await this.app.vault.read(file);
+    const raw = await this.app.vault.cachedRead(file);
     const body = raw.replace(FRONTMATTER_RE, "").trimStart();
     const lines = body.split("\n");
     const snippet = lines.slice(0, PREVIEW_LINES).join("\n") + (lines.length > PREVIEW_LINES ? "\n\n…" : "");
     if (snippet.trim()) {
       const preview = container.createDiv({ cls: "tc-card-preview" });
-      await MarkdownRenderer.render(this.app, snippet, preview, file.path, this as unknown as import("obsidian").Component);
+      await MarkdownRenderer.render(this.app, snippet, preview, file.path, this.previewComponent);
     }
   }
 
   // ── Pass 1 ─────────────────────────────────────────────────────────────────
 
-  private async renderPass1() {
+  private async renderPass1(generation: number) {
     const { contentEl, titleEl } = this;
     contentEl.empty();
 
@@ -86,7 +93,7 @@ export class TriageModal extends Modal {
     titleEl.setText(`Triage (${remaining} left)`);
 
     const card = contentEl.createDiv({ cls: "tc-card" });
-    this.attachSwipe(card, () => this.pass1Keep(), () => this.pass1Trash());
+    this.attachSwipe(card, () => void this.pass1Keep(), () => void this.pass1Trash());
 
     const header = card.createDiv({ cls: "tc-card-header" });
 
@@ -104,6 +111,7 @@ export class TriageModal extends Modal {
     }
 
     await this.renderNotePreview(card, file);
+    if (generation !== this.renderGeneration || this.phase !== "pass1" || file !== this.candidates[this.pass1Index]) return;
 
     // Buttons
     const actions = contentEl.createDiv({ cls: "tc-actions" });
@@ -111,33 +119,56 @@ export class TriageModal extends Modal {
     const trashBtn = actions.createEl("button", { cls: "tc-btn tc-btn-trash" });
     setIcon(trashBtn, "trash");
     trashBtn.createSpan({ text: "Trash" });
-    trashBtn.addEventListener("click", () => this.pass1Trash());
+    trashBtn.addEventListener("click", () => void this.pass1Trash());
 
     const keepBtn = actions.createEl("button", { cls: "tc-btn tc-btn-keep" });
     setIcon(keepBtn, "check");
     keepBtn.createSpan({ text: "Keep" });
-    keepBtn.addEventListener("click", () => this.pass1Keep());
+    keepBtn.addEventListener("click", () => void this.pass1Keep());
 
     contentEl.createDiv({ cls: "tc-swipe-hint", text: "← trash · keep →  ·  arrow keys on desktop" });
+    this.controlsReady = true;
   }
 
   private async pass1Trash() {
+    if (this.actionInProgress || !this.controlsReady || this.phase !== "pass1") return;
     const file = this.candidates[this.pass1Index];
-    if (file) await this.app.vault.trash(file, true);
-    this.pass1Index++;
-    await this.renderPass1();
+    if (!file) return;
+
+    this.actionInProgress = true;
+    this.controlsReady = false;
+    try {
+      await this.app.fileManager.trashFile(file);
+      this.pass1Index++;
+      await this.render();
+    } catch (error) {
+      console.error("Trash Collection: unable to trash note", error);
+      new Notice(`Couldn't trash ${file.basename}. Please try again.`);
+      this.controlsReady = true;
+    } finally {
+      this.actionInProgress = false;
+    }
   }
 
-  private pass1Keep() {
+  private async pass1Keep() {
+    if (this.actionInProgress || !this.controlsReady || this.phase !== "pass1") return;
     const file = this.candidates[this.pass1Index];
-    if (file) this.kept.push(file);
-    this.pass1Index++;
-    this.renderPass1();
+    if (!file) return;
+
+    this.actionInProgress = true;
+    this.controlsReady = false;
+    try {
+      this.kept.push(file);
+      this.pass1Index++;
+      await this.render();
+    } finally {
+      this.actionInProgress = false;
+    }
   }
 
   // ── Pass 2 ─────────────────────────────────────────────────────────────────
 
-  private async renderPass2() {
+  private async renderPass2(generation: number) {
     const { contentEl, titleEl } = this;
     contentEl.empty();
 
@@ -155,6 +186,7 @@ export class TriageModal extends Modal {
     });
 
     await this.renderNotePreview(card, file);
+    if (generation !== this.renderGeneration || this.phase !== "pass2" || file !== this.kept[this.pass2Index]) return;
 
     // Action UI
     const { pass2Action, shortcuts } = this.settings;
@@ -179,18 +211,30 @@ export class TriageModal extends Modal {
 
     const skipBtn = actions.createEl("button", { cls: "tc-btn" });
     skipBtn.createSpan({ text: "Skip" });
-    skipBtn.addEventListener("click", () => { this.pass2Index++; this.renderPass2(); });
+    skipBtn.addEventListener("click", () => void this.pass2Skip());
 
     const applyBtn = actions.createEl("button", { cls: "tc-btn tc-btn-keep" });
     setIcon(applyBtn, "check");
     applyBtn.createSpan({ text: "Apply" });
     applyBtn.addEventListener("click", async () => {
+      if (this.actionInProgress || !this.controlsReady || this.phase !== "pass2") return;
       const targetName = selectedFile?.basename ?? input.value.trim();
-      if (!targetName) { this.pass2Index++; await this.renderPass2(); return; }
-      const wikilink = `[[${selectedFile ? selectedFile.basename : targetName}]]`;
-      await this.applyPass2Action(file, wikilink);
-      this.pass2Index++;
-      await this.renderPass2();
+      this.actionInProgress = true;
+      this.controlsReady = false;
+      try {
+        if (targetName) {
+          const wikilink = `[[${selectedFile ? selectedFile.basename : targetName}]]`;
+          await this.applyPass2Action(file, wikilink);
+        }
+        this.pass2Index++;
+        await this.render();
+      } catch (error) {
+        console.error("Trash Collection: unable to apply categorization", error);
+        new Notice(`Couldn't update ${file.basename}. Please try again.`);
+        this.controlsReady = true;
+      } finally {
+        this.actionInProgress = false;
+      }
     });
 
     input.addEventListener("keydown", async (e) => {
@@ -198,7 +242,21 @@ export class TriageModal extends Modal {
       applyBtn.click();
     });
 
+    this.controlsReady = true;
     setTimeout(() => input.focus(), 50);
+  }
+
+  private async pass2Skip() {
+    if (this.actionInProgress || !this.controlsReady || this.phase !== "pass2") return;
+
+    this.actionInProgress = true;
+    this.controlsReady = false;
+    try {
+      this.pass2Index++;
+      await this.render();
+    } finally {
+      this.actionInProgress = false;
+    }
   }
 
   private async applyPass2Action(file: TFile, wikilink: string) {
@@ -206,9 +264,7 @@ export class TriageModal extends Modal {
 
     if (pass2Action.type === "replace-link") {
       if (!pass2Action.findLink) return;
-      const content = await this.app.vault.read(file);
-      const updated = content.split(pass2Action.findLink).join(wikilink);
-      await this.app.vault.modify(file, updated);
+      await this.app.vault.process(file, (content) => content.split(pass2Action.findLink).join(wikilink));
     } else {
       await this.applyFrontmatterAction(file, wikilink);
     }
@@ -231,8 +287,7 @@ export class TriageModal extends Modal {
       console.warn("Trash Collection: repairing frontmatter with text fallback", error);
     }
 
-    const content = await this.app.vault.read(file);
-    await this.app.vault.modify(file, updateFrontmatterField(content, key, wikilink, preferList));
+    await this.app.vault.process(file, (content) => updateFrontmatterField(content, key, wikilink, preferList));
   }
 
   // ── Done ───────────────────────────────────────────────────────────────────
@@ -254,5 +309,9 @@ export class TriageModal extends Modal {
     });
   }
 
-  onClose() { this.contentEl.empty(); }
+  onClose() {
+    this.renderGeneration++;
+    this.previewComponent.unload();
+    this.contentEl.empty();
+  }
 }

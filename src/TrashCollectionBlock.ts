@@ -110,7 +110,7 @@ export class TrashCollectionBlock extends MarkdownRenderChild {
     const deleteBtn = btns.createEl("button", { cls: "tc-block-btn tc-block-btn-del" });
     setIcon(deleteBtn, "trash");
     deleteBtn.addEventListener("click", async () => {
-      await this.app.vault.trash(file, true);
+      await this.app.fileManager.trashFile(file);
       this.render();
     });
   }

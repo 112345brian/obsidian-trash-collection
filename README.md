@@ -122,6 +122,10 @@ if (api) {
 
 `getTrashCollectionApi` returns `null` if the plugin is not loaded or the API version doesn't match. The current `API_VERSION` is exported for version-checking.
 
+## Releasing
+
+User-visible changes include a [Changeset](.changeset/README.md). Before a release, run `npx changeset status`, then `npx changeset version`; commit the generated version and changelog changes and create an annotated version tag.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
