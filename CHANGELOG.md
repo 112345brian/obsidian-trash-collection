@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 — 2026-09-06
+
+### Bug fixes
+
+- 569f864: Prevent rapid triage interactions from applying actions more than once or showing a stale note. Note deletion now honors the vault's configured trash preference, and build tooling uses an updated esbuild dependency.
+
 ## Unreleased
 
 ### Condition groups & presence operators
